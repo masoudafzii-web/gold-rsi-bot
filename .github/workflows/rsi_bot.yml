@@ -1,0 +1,39 @@
+name: RSI Gold Signal Bot
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes
+  workflow_dispatch: {}       # lets you also run it manually from GitHub app
+
+permissions:
+  contents: write
+
+jobs:
+  check-signal:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run signal bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+        run: python rsi_signal_bot.py
+
+      - name: Commit updated state (if changed)
+        run: |
+          git config user.name "rsi-bot"
+          git config user.email "rsi-bot@users.noreply.github.com"
+          git add state.json
+          git diff --quiet && git diff --staged --quiet || git commit -m "update state"
+          git push
