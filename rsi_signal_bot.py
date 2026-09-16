@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 TWELVEDATA_API_KEY = os.environ["TWELVEDATA_API_KEY"]
 
 SYMBOL       = "XAU/USD"
-INTERVAL     = "15min"
+INTERVAL     = "5min"
 RSI_PERIOD   = 14
 OVERSOLD     = 30.0
 OVERBOUGHT   = 70.0
@@ -165,7 +165,7 @@ def main():
 
         emoji = "🟢" if signal == "BUY" else "🔴"
         msg = (
-            f"{emoji} سیگنال {signal} روی XAUUSD (M15)\n"
+            f"{emoji} سیگنال {signal} روی XAUUSD (M5)\n"
             f"قیمت ورود: {price:.2f}\n"
             f"حد ضرر (SL): {sl:.2f}\n"
             f"حد سود (TP): {tp:.2f}\n"
@@ -187,4 +187,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-
