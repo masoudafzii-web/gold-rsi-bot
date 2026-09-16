@@ -24,6 +24,10 @@ OVERSOLD     = 30.0
 OVERBOUGHT   = 70.0
 STATE_FILE   = "state.json"
 
+ATR_PERIOD   = 14
+ATR_SL_MULT  = 1.5   # Stop Loss  = ATR * this
+ATR_TP_MULT  = 3.0   # Take Profit = ATR * this (risk:reward ~1:2)
+
 # ---------------------------------------------------------------------------
 
 
@@ -33,7 +37,7 @@ def fetch_candles():
     params = {
         "symbol": SYMBOL,
         "interval": INTERVAL,
-        "outputsize": RSI_PERIOD + 20,  # extra bars for a stable RSI calc
+        "outputsize": RSI_PERIOD + ATR_PERIOD + 20,  # extra bars for stable calcs
         "apikey": TWELVEDATA_API_KEY,
     }
     r = requests.get(url, params=params, timeout=30)
@@ -44,6 +48,31 @@ def fetch_candles():
     # API returns newest first; reverse to chronological order
     candles = list(reversed(data["values"]))
     return candles
+
+
+def calculate_atr(highs, lows, closes, period=ATR_PERIOD):
+    """Wilder's ATR. Returns a list aligned to closes (None where not enough data)."""
+    atr = [None] * len(closes)
+    if len(closes) <= period:
+        return atr
+
+    trs = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        trs.append(tr)
+
+    avg_tr = sum(trs[:period]) / period
+    atr[period] = avg_tr
+
+    for i in range(period, len(trs)):
+        avg_tr = (avg_tr * (period - 1) + trs[i]) / period
+        atr[i + 1] = avg_tr
+
+    return atr
 
 
 def calculate_rsi(closes, period=RSI_PERIOD):
@@ -94,16 +123,21 @@ def send_telegram(message):
 def main():
     candles = fetch_candles()
     closes = [float(c["close"]) for c in candles]
-    times = [c["datetime"] for c in candles]
+    highs  = [float(c["high"])  for c in candles]
+    lows   = [float(c["low"])   for c in candles]
+    times  = [c["datetime"]     for c in candles]
 
     rsi_values = calculate_rsi(closes)
+    atr_values = calculate_atr(highs, lows, closes)
 
     # Use the last two *closed* candles: index -2 (previous) and -1 (last closed)
-    if len(candles) < 2 or rsi_values[-1] is None or rsi_values[-2] is None:
+    if (len(candles) < 2 or rsi_values[-1] is None or rsi_values[-2] is None
+            or atr_values[-1] is None):
         print("Not enough data yet.")
         return
 
     rsi_prev, rsi_last = rsi_values[-2], rsi_values[-1]
+    atr_last = atr_values[-1]
     last_candle_time = times[-1]
 
     state = load_state()
@@ -119,16 +153,28 @@ def main():
 
     if signal:
         price = closes[-1]
+        sl_dist = atr_last * ATR_SL_MULT
+        tp_dist = atr_last * ATR_TP_MULT
+
+        if signal == "BUY":
+            sl = price - sl_dist
+            tp = price + tp_dist
+        else:
+            sl = price + sl_dist
+            tp = price - tp_dist
+
         emoji = "🟢" if signal == "BUY" else "🔴"
         msg = (
             f"{emoji} سیگنال {signal} روی XAUUSD (M15)\n"
-            f"قیمت: {price:.2f}\n"
-            f"RSI: {rsi_last:.1f}\n"
+            f"قیمت ورود: {price:.2f}\n"
+            f"حد ضرر (SL): {sl:.2f}\n"
+            f"حد سود (TP): {tp:.2f}\n"
+            f"RSI: {rsi_last:.1f}   |   ATR: {atr_last:.2f}\n"
             f"زمان کندل: {last_candle_time}\n\n"
             f"⚠ فقط یک سیگنال است، نه توصیه قطعی. تصمیم نهایی و مدیریت ریسک با خودت."
         )
         send_telegram(msg)
-        print(f"Sent {signal} signal.")
+        print(f"Sent {signal} signal. SL={sl:.2f} TP={tp:.2f}")
         state["last_alerted_candle"] = last_candle_time
         save_state(state)
     else:
@@ -141,3 +187,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
