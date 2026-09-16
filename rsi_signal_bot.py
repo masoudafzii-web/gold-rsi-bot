@@ -16,6 +16,7 @@ import requests
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 TWELVEDATA_API_KEY = os.environ["TWELVEDATA_API_KEY"]
+DEEPSEEK_API_KEY    = os.environ.get("DEEPSEEK_API_KEY")  # optional, free credit -> AI analysis
 
 SYMBOL       = "XAU/USD"
 INTERVAL     = "5min"
@@ -114,6 +115,53 @@ def save_state(state):
         json.dump(state, f)
 
 
+def get_ai_analysis(signal, price, sl, tp, rsi, atr, closes):
+    """Ask DeepSeek (free credit on signup, not US-restricted) for a brief
+    Persian opinion on whether this RSI signal looks reasonable, based on
+    recent price action. Returns a short string, or None if AI is not
+    configured / the call fails (never blocks sending the base signal)."""
+    if not DEEPSEEK_API_KEY:
+        return None
+
+    recent_trend = closes[-10:]
+    trend_desc = ", ".join(f"{c:.2f}" for c in recent_trend)
+
+    prompt = (
+        f"یک سیگنال معاملاتی خودکار روی طلا (XAU/USD) بر اساس RSI صادر شده:\n"
+        f"جهت: {signal}\n"
+        f"قیمت فعلی: {price:.2f}\n"
+        f"RSI: {rsi:.1f}\n"
+        f"ATR: {atr:.2f}\n"
+        f"حد ضرر: {sl:.2f} | حد سود: {tp:.2f}\n"
+        f"قیمت‌های ۱۰ کندل اخیر: {trend_desc}\n\n"
+        f"فقط بر اساس همین داده‌های قیمتی (بدون دسترسی به اخبار بیرونی)، در حداکثر "
+        f"۳ جمله‌ی فارسی و خیلی خلاصه بگو آیا این سیگنال با روند اخیر قیمت "
+        f"هم‌راستاست یا در تضاده. لحن تحلیلی و محتاطانه باشه، نه توصیه قطعی."
+    )
+
+    try:
+        resp = requests.post(
+            "https://api.deepseek.com/chat/completions",
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "deepseek-chat",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 300,
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["choices"][0]["message"]["content"].strip()
+        return text or None
+    except Exception as e:
+        print(f"AI analysis skipped (error: {e})")
+        return None
+
+
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     resp = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=15)
@@ -164,14 +212,20 @@ def main():
             tp = price - tp_dist
 
         emoji = "🟢" if signal == "BUY" else "🔴"
+        ai_note = get_ai_analysis(signal, price, sl, tp, rsi_last, atr_last, closes)
+
         msg = (
             f"{emoji} سیگنال {signal} روی XAUUSD (M5)\n"
             f"قیمت ورود: {price:.2f}\n"
             f"حد ضرر (SL): {sl:.2f}\n"
             f"حد سود (TP): {tp:.2f}\n"
             f"RSI: {rsi_last:.1f}   |   ATR: {atr_last:.2f}\n"
-            f"زمان کندل: {last_candle_time}\n\n"
-            f"⚠ فقط یک سیگنال است، نه توصیه قطعی. تصمیم نهایی و مدیریت ریسک با خودت."
+            f"زمان کندل: {last_candle_time}\n"
+        )
+        if ai_note:
+            msg += f"\n🤖 تحلیل هوش مصنوعی:\n{ai_note}\n"
+        msg += (
+            f"\n⚠ فقط یک سیگنال است، نه توصیه قطعی. تصمیم نهایی و مدیریت ریسک با خودت."
         )
         send_telegram(msg)
         print(f"Sent {signal} signal. SL={sl:.2f} TP={tp:.2f}")
