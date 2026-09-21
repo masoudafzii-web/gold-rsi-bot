@@ -16,7 +16,7 @@ import requests
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 TWELVEDATA_API_KEY = os.environ["TWELVEDATA_API_KEY"]
-DEEPSEEK_API_KEY    = os.environ.get("DEEPSEEK_API_KEY")  # optional, free credit -> AI analysis
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")  # optional, free credit -> AI analysis
 
 SYMBOL       = "XAU/USD"
 INTERVAL     = "5min"
