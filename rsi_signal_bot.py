@@ -16,7 +16,7 @@ import requests
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 TWELVEDATA_API_KEY = os.environ["TWELVEDATA_API_KEY"]
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")  # optional, free credit -> AI analysis
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")  # optional, free tier -> AI analysis
 
 SYMBOL       = "XAU/USD"
 INTERVAL     = "5min"
@@ -116,11 +116,11 @@ def save_state(state):
 
 
 def get_ai_analysis(signal, price, sl, tp, rsi, atr, closes):
-    """Ask DeepSeek (free credit on signup, not US-restricted) for a brief
-    Persian opinion on whether this RSI signal looks reasonable, based on
-    recent price action. Returns a short string, or None if AI is not
-    configured / the call fails (never blocks sending the base signal)."""
-    if not DEEPSEEK_API_KEY:
+    """Ask Groq (free tier, llama-3.3-70b-versatile) for a brief Persian
+    opinion on whether this RSI signal looks reasonable, based on recent
+    price action. Returns a short string, or None if AI is not configured
+    / the call fails (never blocks sending the base signal)."""
+    if not GROQ_API_KEY:
         return None
 
     recent_trend = closes[-10:]
@@ -141,13 +141,13 @@ def get_ai_analysis(signal, price, sl, tp, rsi, atr, closes):
 
     try:
         resp = requests.post(
-            "https://api.deepseek.com/chat/completions",
+            "https://api.groq.com/openai/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Authorization": f"Bearer {GROQ_API_KEY}",
                 "Content-Type": "application/json",
             },
             json={
-                "model": "deepseek-chat",
+                "model": "llama-3.3-70b-versatile",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 300,
             },
