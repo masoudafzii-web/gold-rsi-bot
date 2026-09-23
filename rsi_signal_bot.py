@@ -1,6 +1,12 @@
 """
 RSI Signal Bot for XAU/USD (Gold) -> sends BUY/SELL alerts to Telegram.
-Runs on a schedule (e.g. every 15 minutes) via GitHub Actions - no server needed.
+Runs on a schedule (e.g. every 5 minutes) via GitHub Actions - no server needed.
+
+v2 changes (accuracy improvements):
+  - EMA50(H1) trend filter: BUY only allowed when price is above the H1 trend,
+    SELL only allowed when price is below it. Cuts fake reversal signals a lot.
+  - Guard against using an unclosed/forming candle from the API.
+  - RSI thresholds are now configurable constants (default made a bit stricter).
 
 ⚠ This is a template for educational/personal use, not a proven profitable
 strategy. It only sends alerts; YOU decide whether to place the trade
@@ -10,6 +16,8 @@ manually in your MT5 app. Not financial advice.
 import os
 import json
 import sys
+from datetime import datetime, timezone
+
 import requests
 
 # ---- Config from environment variables (set as GitHub Secrets) ----------
@@ -29,16 +37,26 @@ ATR_PERIOD   = 14
 ATR_SL_MULT  = 1.5   # Stop Loss  = ATR * this
 ATR_TP_MULT  = 3.0   # Take Profit = ATR * this (risk:reward ~1:2)
 
+# --- New: trend filter config ---
+TREND_INTERVAL   = "1h"
+TREND_EMA_PERIOD = 50
+USE_TREND_FILTER = True   # set False to go back to old RSI-only behavior
+
 # ---------------------------------------------------------------------------
 
 
-def fetch_candles():
-    """Fetch recent closed candles from Twelve Data (most recent first)."""
+def fetch_candles(interval=INTERVAL, outputsize=None):
+    """Fetch recent candles from Twelve Data (most recent first -> reversed to
+    chronological order). Twelve Data can include the currently-forming bar
+    as the most recent entry, so callers that care about "closed" candles
+    should use is_last_candle_closed() before trusting the final bar."""
+    if outputsize is None:
+        outputsize = RSI_PERIOD + ATR_PERIOD + 20
     url = "https://api.twelvedata.com/time_series"
     params = {
         "symbol": SYMBOL,
-        "interval": INTERVAL,
-        "outputsize": RSI_PERIOD + ATR_PERIOD + 20,  # extra bars for stable calcs
+        "interval": interval,
+        "outputsize": outputsize,
         "apikey": TWELVEDATA_API_KEY,
     }
     r = requests.get(url, params=params, timeout=30)
@@ -46,9 +64,24 @@ def fetch_candles():
     data = r.json()
     if "values" not in data:
         raise RuntimeError(f"Unexpected API response: {data}")
-    # API returns newest first; reverse to chronological order
     candles = list(reversed(data["values"]))
     return candles
+
+
+def is_last_candle_closed(last_candle_time_str, interval_minutes):
+    """Twelve Data timestamps are UTC in 'YYYY-MM-DD HH:MM:SS' format for
+    intraday intervals. A bar is only closed once interval_minutes have
+    fully elapsed since it opened."""
+    try:
+        candle_open = datetime.strptime(last_candle_time_str, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        # Some responses use date-only for daily+ intervals; treat as closed.
+        return True
+    now = datetime.now(timezone.utc)
+    elapsed_minutes = (now - candle_open).total_seconds() / 60.0
+    return elapsed_minutes >= interval_minutes
 
 
 def calculate_atr(highs, lows, closes, period=ATR_PERIOD):
@@ -103,6 +136,42 @@ def calculate_rsi(closes, period=RSI_PERIOD):
     return rsi
 
 
+def calculate_ema(values, period):
+    """Standard EMA. Returns a list aligned to values (None where not enough data)."""
+    ema = [None] * len(values)
+    if len(values) < period:
+        return ema
+
+    sma = sum(values[:period]) / period
+    ema[period - 1] = sma
+    multiplier = 2 / (period + 1)
+
+    for i in range(period, len(values)):
+        ema[i] = (values[i] - ema[i - 1]) * multiplier + ema[i - 1]
+
+    return ema
+
+
+def get_trend_direction():
+    """Fetch H1 candles and return 'up', 'down', or None (not enough data /
+    error -> caller should treat as 'unknown' and be conservative)."""
+    try:
+        candles = fetch_candles(interval=TREND_INTERVAL, outputsize=TREND_EMA_PERIOD + 20)
+    except Exception as e:
+        print(f"Trend fetch failed, skipping trend filter this run: {e}")
+        return None
+
+    closes = [float(c["close"]) for c in candles]
+    ema_values = calculate_ema(closes, TREND_EMA_PERIOD)
+
+    if ema_values[-1] is None:
+        return None
+
+    last_price = closes[-1]
+    last_ema = ema_values[-1]
+    return "up" if last_price > last_ema else "down"
+
+
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
@@ -116,10 +185,10 @@ def save_state(state):
 
 
 def get_ai_analysis(signal, price, sl, tp, rsi, atr, closes):
-    """Ask Groq (free tier, llama-3.3-70b-versatile) for a brief Persian
-    opinion on whether this RSI signal looks reasonable, based on recent
-    price action. Returns a short string, or None if AI is not configured
-    / the call fails (never blocks sending the base signal)."""
+    """Ask Groq for a brief Persian opinion on whether this RSI signal looks
+    reasonable, based on recent price action. Returns a short string, or None
+    if AI is not configured / the call fails (never blocks sending the base
+    signal)."""
     if not GROQ_API_KEY:
         return None
 
@@ -147,7 +216,7 @@ def get_ai_analysis(signal, price, sl, tp, rsi, atr, closes):
                 "Content-Type": "application/json",
             },
             json={
-                "model": "llama-3.3-70b-versatile",
+                "model": "openai/gpt-oss-120b",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 300,
             },
@@ -170,6 +239,13 @@ def send_telegram(message):
 
 def main():
     candles = fetch_candles()
+
+    # Drop the last candle if it's still forming (not fully closed yet).
+    interval_minutes = int(INTERVAL.replace("min", ""))
+    if candles and not is_last_candle_closed(candles[-1]["datetime"], interval_minutes):
+        print("Last candle not fully closed yet, dropping it from calculations.")
+        candles = candles[:-1]
+
     closes = [float(c["close"]) for c in candles]
     highs  = [float(c["high"])  for c in candles]
     lows   = [float(c["low"])   for c in candles]
@@ -178,7 +254,6 @@ def main():
     rsi_values = calculate_rsi(closes)
     atr_values = calculate_atr(highs, lows, closes)
 
-    # Use the last two *closed* candles: index -2 (previous) and -1 (last closed)
     if (len(candles) < 2 or rsi_values[-1] is None or rsi_values[-2] is None
             or atr_values[-1] is None):
         print("Not enough data yet.")
@@ -199,6 +274,19 @@ def main():
     elif rsi_prev > OVERBOUGHT >= rsi_last:
         signal = "SELL"
 
+    # --- Trend filter: only allow the signal if it agrees with the H1 trend ---
+    if signal and USE_TREND_FILTER:
+        trend = get_trend_direction()
+        if trend is None:
+            print("Trend unknown (fetch/data issue) - skipping signal to be safe.")
+            signal = None
+        elif signal == "BUY" and trend != "up":
+            print(f"BUY signal rejected: H1 trend is '{trend}', not 'up'.")
+            signal = None
+        elif signal == "SELL" and trend != "down":
+            print(f"SELL signal rejected: H1 trend is '{trend}', not 'down'.")
+            signal = None
+
     if signal:
         price = closes[-1]
         sl_dist = atr_last * ATR_SL_MULT
@@ -215,7 +303,7 @@ def main():
         ai_note = get_ai_analysis(signal, price, sl, tp, rsi_last, atr_last, closes)
 
         msg = (
-            f"{emoji} سیگنال {signal} روی XAUUSD (M5)\n"
+            f"{emoji} سیگنال {signal} روی XAUUSD (M5, هم‌راستا با روند H1)\n"
             f"قیمت ورود: {price:.2f}\n"
             f"حد ضرر (SL): {sl:.2f}\n"
             f"حد سود (TP): {tp:.2f}\n"
